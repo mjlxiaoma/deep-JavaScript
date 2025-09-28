@@ -11,6 +11,19 @@ const port = 3000;
 app.use(express.json());
 app.use(express.static('./'));
 
+// 配置CORS，允许Vue3前端访问
+app.use((req, res, next) => {
+    res.header('Access-Control-Allow-Origin', 'http://localhost:5173');
+    res.header('Access-Control-Allow-Methods', 'GET,PUT,POST,DELETE,OPTIONS');
+    res.header('Access-Control-Allow-Headers', 'Content-Type, Authorization, Content-Length, X-Requested-With');
+    
+    if (req.method === 'OPTIONS') {
+        res.sendStatus(200);
+    } else {
+        next();
+    }
+});
+
 // 配置multer用于处理文件上传
 const upload = multer({ dest: 'temp/' });
 
@@ -216,18 +229,29 @@ app.delete('/api/upload/:md5/:fileName', async (req, res) => {
     }
 });
 
+// 健康检查接口，供Vue3前端检测服务器状态
+app.get('/api/health', (req, res) => {
+    res.json({ 
+        status: 'ok', 
+        message: '服务器运行正常',
+        timestamp: new Date().toISOString() 
+    });
+});
+
 // 启动服务器
 async function startServer() {
     await ensureDirectories();
     
     app.listen(port, () => {
         console.log(`断点续传服务器运行在 http://localhost:${port}`);
+        console.log('Vue3前端地址: http://localhost:5173');
         console.log('功能特性:');
         console.log('- 大文件分块上传');
         console.log('- MD5校验确保文件完整性');
         console.log('- 断点续传支持');
-        console.log('- Web Worker计算MD5');
-        console.log('- 实时上传进度显示');
+        console.log('- Vue3 + TypeScript前端');
+        console.log('- 跨域支持');
+        console.log('- 健康检查接口');
     });
 }
 
