@@ -1,0 +1,591 @@
+<!DOCTYPE html>
+<html lang="zh">
+<head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>断点续传文件上传</title>
+    <style>
+        body {
+            font-family: Arial, sans-serif;
+            max-width: 800px;
+            margin: 0 auto;
+            padding: 20px;
+            background-color: #f5f5f5;
+        }
+        
+        .upload-container {
+            background: white;
+            border-radius: 8px;
+            padding: 30px;
+            box-shadow: 0 2px 10px rgba(0,0,0,0.1);
+        }
+        
+        .file-input-wrapper {
+            position: relative;
+            display: inline-block;
+            cursor: pointer;
+            background: #007bff;
+            color: white;
+            padding: 12px 24px;
+            border-radius: 6px;
+            transition: background-color 0.3s;
+        }
+        
+        .file-input-wrapper:hover {
+            background: #0056b3;
+        }
+        
+        .file-input-wrapper input[type=file] {
+            position: absolute;
+            left: -9999px;
+        }
+        
+        .file-list {
+            margin-top: 20px;
+        }
+        
+        .file-item {
+            background: #f8f9fa;
+            border: 1px solid #dee2e6;
+            border-radius: 6px;
+            padding: 15px;
+            margin-bottom: 10px;
+        }
+        
+        .file-info {
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+            margin-bottom: 10px;
+        }
+        
+        .file-name {
+            font-weight: bold;
+            color: #333;
+        }
+        
+        .file-size {
+            color: #666;
+            font-size: 14px;
+        }
+        
+        .progress-container {
+            background: #e9ecef;
+            border-radius: 4px;
+            height: 8px;
+            margin: 10px 0;
+            overflow: hidden;
+        }
+        
+        .progress-bar {
+            background: #28a745;
+            height: 100%;
+            width: 0%;
+            transition: width 0.3s ease;
+        }
+        
+        .file-status {
+            font-size: 14px;
+            margin-top: 5px;
+        }
+        
+        .status-calculating {
+            color: #ffc107;
+        }
+        
+        .status-uploading {
+            color: #007bff;
+        }
+        
+        .status-success {
+            color: #28a745;
+        }
+        
+        .status-error {
+            color: #dc3545;
+        }
+        
+        .status-paused {
+            color: #6c757d;
+        }
+        
+        .file-actions {
+            margin-top: 10px;
+        }
+        
+        .btn {
+            padding: 6px 12px;
+            border: none;
+            border-radius: 4px;
+            cursor: pointer;
+            font-size: 14px;
+            margin-right: 5px;
+        }
+        
+        .btn-primary {
+            background: #007bff;
+            color: white;
+        }
+        
+        .btn-secondary {
+            background: #6c757d;
+            color: white;
+        }
+        
+        .btn-danger {
+            background: #dc3545;
+            color: white;
+        }
+        
+        .btn:hover {
+            opacity: 0.8;
+        }
+        
+        .btn:disabled {
+            opacity: 0.5;
+            cursor: not-allowed;
+        }
+    </style>
+</head>
+<body>
+    <div class="upload-container">
+        <h1>断点续传文件上传</h1>
+        <p>支持大文件上传、MD5校验、断点续传功能</p>
+        
+        <div class="file-input-wrapper" onclick="document.getElementById('fileInput').click()">
+            <input type="file" id="fileInput" multiple />
+            选择文件
+        </div>
+        
+        <div class="file-list" id="fileList"></div>
+        
+        <div id="serverStatus" style="margin-top: 20px; padding: 10px; border-radius: 4px; display: none;">
+            <strong>服务器状态:</strong> <span id="statusText"></span>
+        </div>
+    </div>
+
+    <script>
+        class ChunkedUploader {
+            constructor() {
+                this.chunkSize = 1024 * 1024; // 1MB per chunk
+                this.uploads = new Map();
+                this.worker = null;
+                this.initWorker();
+                this.initEventListeners();
+            }
+
+            initWorker() {
+                // 创建MD5计算的Web Worker
+                const workerCode = `
+                    // 简化的MD5实现 (实际项目中建议使用crypto-js等库)
+                    function simpleHash(str) {
+                        let hash = 0;
+                        if (str.length === 0) return hash.toString(16);
+                        for (let i = 0; i < str.length; i++) {
+                            const char = str.charCodeAt(i);
+                            hash = ((hash << 5) - hash) + char;
+                            hash = hash & hash; // Convert to 32bit integer
+                        }
+                        return Math.abs(hash).toString(16);
+                    }
+
+                    self.onmessage = function(e) {
+                        const { fileId, chunk, chunkIndex } = e.data;
+                        
+                        const reader = new FileReader();
+                        reader.onload = function(event) {
+                            const arrayBuffer = event.target.result;
+                            const uint8Array = new Uint8Array(arrayBuffer);
+                            const binaryString = Array.from(uint8Array).map(byte => String.fromCharCode(byte)).join('');
+                            const hash = simpleHash(binaryString);
+                            
+                            self.postMessage({
+                                fileId,
+                                chunkIndex,
+                                hash,
+                                success: true
+                            });
+                        };
+                        
+                        reader.onerror = function() {
+                            self.postMessage({
+                                fileId,
+                                chunkIndex,
+                                success: false,
+                                error: 'Failed to read chunk'
+                            });
+                        };
+                        
+                        reader.readAsArrayBuffer(chunk);
+                    };
+                `;
+
+                const blob = new Blob([workerCode], { type: 'application/javascript' });
+                this.worker = new Worker(URL.createObjectURL(blob));
+                
+                this.worker.onmessage = (e) => {
+                    this.handleWorkerMessage(e.data);
+                };
+            }
+
+            handleWorkerMessage(data) {
+                const { fileId, chunkIndex, hash, success, error } = data;
+                const upload = this.uploads.get(fileId);
+                
+                if (!upload) return;
+
+                if (success) {
+                    upload.chunkHashes[chunkIndex] = hash;
+                    upload.hashProgress++;
+                    
+                    this.updateProgress(fileId, 'calculating', 
+                        (upload.hashProgress / upload.totalChunks) * 50);
+                    
+                    // 如果所有chunk的hash都计算完成，开始上传
+                    if (upload.hashProgress === upload.totalChunks) {
+                        upload.md5 = this.combineHashes(upload.chunkHashes);
+                        this.startUpload(fileId);
+                    }
+                } else {
+                    this.updateStatus(fileId, 'error', `Hash计算失败: ${error}`);
+                }
+            }
+
+            combineHashes(chunkHashes) {
+                // 简单的hash合并策略
+                return chunkHashes.join('').slice(0, 32);
+            }
+
+            initEventListeners() {
+                const fileInput = document.getElementById('fileInput');
+                
+                // 添加调试日志
+                console.log('初始化文件上传器');
+                
+                fileInput.addEventListener('change', (e) => {
+                    console.log('文件选择事件触发', e.target.files);
+                    
+                    if (e.target.files.length === 0) {
+                        console.log('没有选择文件');
+                        return;
+                    }
+                    
+                    Array.from(e.target.files).forEach(file => {
+                        console.log('添加文件:', file.name, file.size);
+                        this.addFile(file);
+                    });
+                    
+                    // 重置文件输入，允许选择相同文件
+                    e.target.value = '';
+                });
+                
+                // 添加错误处理
+                window.addEventListener('error', (e) => {
+                    console.error('JavaScript错误:', e.error);
+                });
+            }
+
+            addFile(file) {
+                const fileId = this.generateFileId(file);
+                const totalChunks = Math.ceil(file.size / this.chunkSize);
+                
+                const upload = {
+                    file,
+                    fileId,
+                    totalChunks,
+                    uploadedChunks: 0,
+                    hashProgress: 0,
+                    chunkHashes: new Array(totalChunks),
+                    md5: null,
+                    status: 'preparing',
+                    paused: false,
+                    abortController: null
+                };
+
+                this.uploads.set(fileId, upload);
+                this.renderFileItem(upload);
+                this.calculateMD5(upload);
+            }
+
+            generateFileId(file) {
+                return `${file.name}_${file.size}_${file.lastModified}`;
+            }
+
+            calculateMD5(upload) {
+                this.updateStatus(upload.fileId, 'calculating', '正在计算文件校验值...');
+                
+                for (let i = 0; i < upload.totalChunks; i++) {
+                    const start = i * this.chunkSize;
+                    const end = Math.min(start + this.chunkSize, upload.file.size);
+                    const chunk = upload.file.slice(start, end);
+                    
+                    this.worker.postMessage({
+                        fileId: upload.fileId,
+                        chunk,
+                        chunkIndex: i
+                    });
+                }
+            }
+
+            async startUpload(fileId) {
+                const upload = this.uploads.get(fileId);
+                if (!upload) return;
+
+                this.updateStatus(fileId, 'uploading', '开始上传...');
+                
+                // 检查服务器已上传的chunks
+                const uploadedChunks = await this.checkUploadedChunks(upload);
+                upload.uploadedChunks = uploadedChunks.length;
+                
+                this.updateProgress(fileId, 'uploading', 
+                    50 + (upload.uploadedChunks / upload.totalChunks) * 50);
+
+                if (upload.uploadedChunks === upload.totalChunks) {
+                    this.updateStatus(fileId, 'success', '文件已存在，上传完成');
+                    return;
+                }
+
+                // 上传剩余的chunks
+                await this.uploadRemainingChunks(upload, uploadedChunks);
+            }
+
+            async checkUploadedChunks(upload) {
+                try {
+                    console.log('检查已上传的chunks:', upload.md5);
+                    
+                    // 检查服务器是否可用
+                    const response = await fetch('/api/check-chunks', {
+                        method: 'POST',
+                        headers: { 'Content-Type': 'application/json' },
+                        body: JSON.stringify({
+                            md5: upload.md5,
+                            fileName: upload.file.name,
+                            totalChunks: upload.totalChunks
+                        })
+                    });
+                    
+                    if (response.ok) {
+                        const data = await response.json();
+                        console.log('服务器返回已上传chunks:', data.uploadedChunks);
+                        return data.uploadedChunks || [];
+                    } else {
+                        console.error('服务器响应错误:', response.status, response.statusText);
+                        this.updateStatus(upload.fileId, 'error', `服务器错误: ${response.status}`);
+                    }
+                } catch (error) {
+                    console.error('检查chunks失败:', error);
+                    this.updateStatus(upload.fileId, 'error', '无法连接到服务器，请确保服务器正在运行');
+                }
+                
+                return [];
+            }
+
+            async uploadRemainingChunks(upload, uploadedChunks) {
+                const uploadedSet = new Set(uploadedChunks);
+                
+                for (let i = 0; i < upload.totalChunks; i++) {
+                    if (uploadedSet.has(i)) continue;
+                    if (upload.paused) break;
+                    
+                    const success = await this.uploadChunk(upload, i);
+                    if (success) {
+                        upload.uploadedChunks++;
+                        this.updateProgress(upload.fileId, 'uploading', 
+                            50 + (upload.uploadedChunks / upload.totalChunks) * 50);
+                    } else {
+                        this.updateStatus(upload.fileId, 'error', '上传失败');
+                        return;
+                    }
+                }
+                
+                if (!upload.paused && upload.uploadedChunks === upload.totalChunks) {
+                    await this.completeUpload(upload);
+                }
+            }
+
+            async uploadChunk(upload, chunkIndex) {
+                const start = chunkIndex * this.chunkSize;
+                const end = Math.min(start + this.chunkSize, upload.file.size);
+                const chunk = upload.file.slice(start, end);
+                
+                const formData = new FormData();
+                formData.append('chunk', chunk);
+                formData.append('chunkIndex', chunkIndex);
+                formData.append('md5', upload.md5);
+                formData.append('fileName', upload.file.name);
+                formData.append('totalChunks', upload.totalChunks);
+                
+                try {
+                    upload.abortController = new AbortController();
+                    const response = await fetch('/api/upload-chunk', {
+                        method: 'POST',
+                        body: formData,
+                        signal: upload.abortController.signal
+                    });
+                    
+                    return response.ok;
+                } catch (error) {
+                    if (error.name === 'AbortError') {
+                        return false;
+                    }
+                    console.error('Chunk upload failed:', error);
+                    return false;
+                }
+            }
+
+            async completeUpload(upload) {
+                try {
+                    const response = await fetch('/api/complete-upload', {
+                        method: 'POST',
+                        headers: { 'Content-Type': 'application/json' },
+                        body: JSON.stringify({
+                            md5: upload.md5,
+                            fileName: upload.file.name,
+                            totalChunks: upload.totalChunks
+                        })
+                    });
+                    
+                    if (response.ok) {
+                        this.updateStatus(upload.fileId, 'success', '上传完成');
+                    } else {
+                        this.updateStatus(upload.fileId, 'error', '合并文件失败');
+                    }
+                } catch (error) {
+                    this.updateStatus(upload.fileId, 'error', '完成上传失败');
+                }
+            }
+
+            pauseUpload(fileId) {
+                const upload = this.uploads.get(fileId);
+                if (upload) {
+                    upload.paused = true;
+                    if (upload.abortController) {
+                        upload.abortController.abort();
+                    }
+                    this.updateStatus(fileId, 'paused', '上传已暂停');
+                }
+            }
+
+            resumeUpload(fileId) {
+                const upload = this.uploads.get(fileId);
+                if (upload) {
+                    upload.paused = false;
+                    this.startUpload(fileId);
+                }
+            }
+
+            cancelUpload(fileId) {
+                const upload = this.uploads.get(fileId);
+                if (upload) {
+                    upload.paused = true;
+                    if (upload.abortController) {
+                        upload.abortController.abort();
+                    }
+                    this.uploads.delete(fileId);
+                    document.getElementById(`file-${fileId}`)?.remove();
+                }
+            }
+
+            renderFileItem(upload) {
+                const fileList = document.getElementById('fileList');
+                const fileItem = document.createElement('div');
+                fileItem.className = 'file-item';
+                fileItem.id = `file-${upload.fileId}`;
+                
+                fileItem.innerHTML = `
+                    <div class="file-info">
+                        <span class="file-name">${upload.file.name}</span>
+                        <span class="file-size">${this.formatFileSize(upload.file.size)}</span>
+                    </div>
+                    <div class="progress-container">
+                        <div class="progress-bar" id="progress-${upload.fileId}"></div>
+                    </div>
+                    <div class="file-status" id="status-${upload.fileId}">准备中...</div>
+                    <div class="file-actions">
+                        <button class="btn btn-secondary" onclick="uploader.pauseUpload('${upload.fileId}')" id="pause-${upload.fileId}">暂停</button>
+                        <button class="btn btn-primary" onclick="uploader.resumeUpload('${upload.fileId}')" id="resume-${upload.fileId}" style="display:none">继续</button>
+                        <button class="btn btn-danger" onclick="uploader.cancelUpload('${upload.fileId}')">取消</button>
+                    </div>
+                `;
+                
+                fileList.appendChild(fileItem);
+            }
+
+            updateProgress(fileId, status, percentage) {
+                const progressBar = document.getElementById(`progress-${fileId}`);
+                if (progressBar) {
+                    progressBar.style.width = `${percentage}%`;
+                }
+            }
+
+            updateStatus(fileId, status, message) {
+                const statusElement = document.getElementById(`status-${fileId}`);
+                const pauseBtn = document.getElementById(`pause-${fileId}`);
+                const resumeBtn = document.getElementById(`resume-${fileId}`);
+                
+                if (statusElement) {
+                    statusElement.textContent = message;
+                    statusElement.className = `file-status status-${status}`;
+                }
+                
+                if (pauseBtn && resumeBtn) {
+                    if (status === 'paused') {
+                        pauseBtn.style.display = 'none';
+                        resumeBtn.style.display = 'inline-block';
+                    } else if (status === 'uploading') {
+                        pauseBtn.style.display = 'inline-block';
+                        resumeBtn.style.display = 'none';
+                    } else if (status === 'success' || status === 'error') {
+                        pauseBtn.style.display = 'none';
+                        resumeBtn.style.display = 'none';
+                    }
+                }
+            }
+
+            formatFileSize(bytes) {
+                if (bytes === 0) return '0 Bytes';
+                const k = 1024;
+                const sizes = ['Bytes', 'KB', 'MB', 'GB'];
+                const i = Math.floor(Math.log(bytes) / Math.log(k));
+                return parseFloat((bytes / Math.pow(k, i)).toFixed(2)) + ' ' + sizes[i];
+            }
+        }
+
+        // 初始化上传器
+        const uploader = new ChunkedUploader();
+        
+        // 检查服务器状态
+        async function checkServerStatus() {
+            const statusDiv = document.getElementById('serverStatus');
+            const statusText = document.getElementById('statusText');
+            
+            try {
+                const response = await fetch('/api/check-chunks', {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({ md5: 'test', fileName: 'test', totalChunks: 1 })
+                });
+                
+                if (response.ok || response.status === 400) {
+                    statusText.textContent = '✅ 服务器运行正常';
+                    statusDiv.style.backgroundColor = '#d4edda';
+                    statusDiv.style.color = '#155724';
+                } else {
+                    statusText.textContent = '❌ 服务器响应异常';
+                    statusDiv.style.backgroundColor = '#f8d7da';
+                    statusDiv.style.color = '#721c24';
+                }
+            } catch (error) {
+                statusText.textContent = '❌ 无法连接到服务器，请启动服务器 (npm start)';
+                statusDiv.style.backgroundColor = '#f8d7da';
+                statusDiv.style.color = '#721c24';
+            }
+            
+            statusDiv.style.display = 'block';
+        }
+        
+        // 页面加载后检查服务器状态
+        window.addEventListener('load', checkServerStatus);
+    </script>
+</body>
+</html>
