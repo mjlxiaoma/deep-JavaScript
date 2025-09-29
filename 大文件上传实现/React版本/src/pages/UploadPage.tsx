@@ -142,6 +142,14 @@ const UploadPage: React.FC = () => {
         file.totalChunks
       )
       
+      // 秒传检查：如果所有分片都已上传，直接标记为完成
+      if (uploadedChunks.length === file.totalChunks) {
+        updateFileStatus(file.id, UploadStatus.COMPLETED)
+        updateFileProgress(file.id, 100)
+        message.success(`${file.fileName} 文件已存在，秒传完成！`)
+        return
+      }
+      
       // 创建分片
       const chunks = uploadService.createChunks(file.file, file.chunkSize)
       
@@ -154,6 +162,14 @@ const UploadPage: React.FC = () => {
 
       let completedChunks = uploadedChunks.length
       const totalChunks = chunks.length
+      
+      // 更新初始进度（MD5 10% + 已上传分片进度）
+      const initialProgress = 10 + (completedChunks / totalChunks) * 90
+      updateFileProgress(file.id, initialProgress)
+      
+      if (completedChunks > 0) {
+        message.info(`${file.fileName} 检测到 ${completedChunks}/${totalChunks} 个分片已上传，继续断点续传`)
+      }
       
       // 上传剩余分片
       await uploadService.uploadChunksConcurrently(
