@@ -164,8 +164,8 @@ const isDragOver = ref(false)
 
 // 上传服务配置
 const uploadConfig: UploadConfig = {
-  chunkSize: 1024 * 1024, // 1MB
-  maxConcurrent: 3,
+  chunkSize: 5 * 1024 * 1024, // 5MB (优化：从1MB增加，减少HTTP请求数) ⚡
+  maxConcurrent: 6, // 6个并发 (优化：从3增加，充分利用带宽) ⚡⚡
   retryTimes: 3,
   apiBaseUrl: '/api'
 }

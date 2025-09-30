@@ -167,7 +167,7 @@
     <script>
         class ChunkedUploader {
             constructor() {
-                this.chunkSize = 1024 * 1024; // 1MB per chunk
+                this.chunkSize = 5 * 1024 * 1024; // 5MB per chunk (优化：从1MB增加，减少HTTP请求数) ⚡
                 this.uploads = new Map();
                 this.worker = null;
                 this.initWorker();

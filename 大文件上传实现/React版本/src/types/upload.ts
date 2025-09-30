@@ -184,10 +184,10 @@ export class UploadError extends Error {
 
 // 常量
 export const UPLOAD_CONSTANTS = {
-  DEFAULT_CHUNK_SIZE: 2 * 1024 * 1024, // 2MB
-  MAX_CONCURRENT_UPLOADS: 3,
+  DEFAULT_CHUNK_SIZE: 5 * 1024 * 1024, // 5MB (优化：从2MB增加，减少HTTP请求数) ⚡
+  MAX_CONCURRENT_UPLOADS: 6, // 6个并发 (优化：从3增加，充分利用带宽) ⚡⚡
   MAX_RETRIES: 3,
-  REQUEST_TIMEOUT: 30000, // 30秒
+  REQUEST_TIMEOUT: 60000, // 60秒 (优化：从30秒增加，适应大分片)
   HASH_WORKER_TIMEOUT: 60000, // 60秒
   SERVER_CHECK_INTERVAL: 30000, // 30秒
   PROGRESS_UPDATE_INTERVAL: 100, // 100ms
