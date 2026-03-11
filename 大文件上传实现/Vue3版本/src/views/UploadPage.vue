@@ -339,18 +339,36 @@ const startUpload = async (fileId: string) => {
 
     uploadStore.updateUpload(fileId, { md5 })
 
-    // 2. 检查已上传的分片
+    // 2. 检查已上传的分片（包含秒传检测）
     uploadStore.updateUpload(fileId, {
       status: 'uploading',
-      message: '检查已上传的分片...'
+      message: '检查服务器文件...'
     })
 
-    const uploadedChunks = await uploadService.checkUploadedChunks(
+    const checkResult = await uploadService.checkUploadedChunks(
       md5, 
       upload.name, 
       upload.totalChunks
     )
 
+    // 🚀 秒传：文件已存在，直接完成
+    if (checkResult.instantUpload) {
+      uploadStore.updateUpload(fileId, {
+        status: 'success',
+        message: '⚡ 文件已存在，秒传成功！',
+        progress: 100,
+        uploadedChunks: upload.totalChunks,
+        completedAt: new Date()
+      })
+      ElMessage.success({
+        message: `⚡ ${upload.name} 秒传成功！`,
+        duration: 3000
+      })
+      return
+    }
+
+    // 断点续传：部分分片已上传
+    const uploadedChunks = checkResult.uploadedChunks || []
     uploadStore.updateUpload(fileId, {
       uploadedChunks: uploadedChunks.length,
       progress: 30 + (uploadedChunks.length / upload.totalChunks) * 70

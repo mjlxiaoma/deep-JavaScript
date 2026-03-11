@@ -85,6 +85,8 @@ class UploadDatabase {
     this.db.exec(`
       CREATE INDEX IF NOT EXISTS idx_uploads_file_id ON uploads(file_id);
       CREATE INDEX IF NOT EXISTS idx_uploads_status ON uploads(status);
+      CREATE INDEX IF NOT EXISTS idx_uploads_md5 ON uploads(md5);
+      CREATE INDEX IF NOT EXISTS idx_uploads_md5_status ON uploads(md5, status);
       CREATE INDEX IF NOT EXISTS idx_uploads_start_time ON uploads(start_time);
       CREATE INDEX IF NOT EXISTS idx_chunks_file_id ON chunks(file_id);
       CREATE INDEX IF NOT EXISTS idx_chunks_index ON chunks(file_id, chunk_index);
@@ -128,6 +130,14 @@ class UploadDatabase {
       
       getUploadsByStatus: this.db.prepare(`
         SELECT * FROM uploads WHERE status = ? ORDER BY start_time DESC
+      `),
+      
+      // 秒传：根据MD5查找已完成的文件
+      findCompletedByMd5: this.db.prepare(`
+        SELECT * FROM uploads 
+        WHERE md5 = ? AND status = 'completed' 
+        ORDER BY complete_time DESC 
+        LIMIT 1
       `),
       
       // 分片相关
@@ -313,6 +323,19 @@ class UploadDatabase {
       };
     } catch (error) {
       this.log('error', `获取上传信息失败: ${error.message}`, fileId);
+      return null;
+    }
+  }
+
+  // 秒传：根据MD5查找已完成的文件
+  findCompletedByMd5(md5) {
+    try {
+      if (!this.statements) this.prepareStatements();
+      
+      const upload = this.statements.findCompletedByMd5.get(md5);
+      return upload || null;
+    } catch (error) {
+      this.log('error', `查找已完成文件失败: ${error.message}`);
       return null;
     }
   }

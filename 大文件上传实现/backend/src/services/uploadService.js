@@ -15,6 +15,23 @@ class UploadService {
    */
   async checkUploadedChunks(fileId, md5, fileName, totalChunks, fileSize = 0, clientInfo = {}) {
     try {
+      // 🚀 秒传检测：先检查是否有相同MD5的已完成文件
+      const existingFile = await this.db.findCompletedByMd5(md5);
+      
+      if (existingFile && existingFile.final_path) {
+        logger.info(`⚡ 秒传命中: ${fileName} (MD5: ${md5})`);
+        
+        // 返回秒传标识和文件信息
+        return {
+          instantUpload: true,
+          fileUrl: existingFile.final_path,
+          fileName: existingFile.file_name,
+          fileSize: existingFile.file_size,
+          uploadedChunks: Array.from({ length: totalChunks }, (_, i) => i) // 所有分片
+        };
+      }
+
+      // 没有秒传，继续正常的断点续传逻辑
       // 首先检查数据库中的上传记录
       let dbInfo = await this.db.getUploadInfo(fileId);
       let uploadedChunks = [];
@@ -59,7 +76,10 @@ class UploadService {
         }
       }
 
-      return uploadedChunks;
+      return {
+        instantUpload: false,
+        uploadedChunks
+      };
     } catch (error) {
       logger.error('检查已上传分片失败', error);
       throw error;

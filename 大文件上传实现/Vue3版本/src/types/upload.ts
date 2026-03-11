@@ -37,8 +37,11 @@ export interface ChunkInfo {
 export interface UploadResponse {
   success: boolean
   message?: string
-  uploadedChunks?: number[]
+  instantUpload?: boolean  // 秒传标识
   fileUrl?: string
+  fileName?: string
+  fileSize?: number
+  uploadedChunks?: number[]
 }
 
 export interface ServerStatus {

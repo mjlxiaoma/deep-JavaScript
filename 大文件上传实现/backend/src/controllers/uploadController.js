@@ -34,7 +34,7 @@ class UploadController {
         userAgent: req.get('User-Agent')
       };
 
-      const uploadedChunks = await this.uploadService.checkUploadedChunks(
+      const result = await this.uploadService.checkUploadedChunks(
         fileId,
         md5,
         fileName,
@@ -43,7 +43,21 @@ class UploadController {
         clientInfo
       );
 
-      Response.success(res, { uploadedChunks });
+      // 如果是秒传，返回特殊标识
+      if (result.instantUpload) {
+        Response.success(res, {
+          instantUpload: true,
+          fileUrl: result.fileUrl,
+          fileName: result.fileName,
+          fileSize: result.fileSize,
+          uploadedChunks: result.uploadedChunks
+        }, '⚡ 文件已存在，秒传成功');
+      } else {
+        Response.success(res, { 
+          instantUpload: false,
+          uploadedChunks: result.uploadedChunks 
+        });
+      }
     } catch (error) {
       next(error);
     }

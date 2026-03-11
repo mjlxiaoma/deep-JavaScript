@@ -105,7 +105,8 @@ class MySQLUploadDatabase {
           INDEX idx_file_id (file_id),
           INDEX idx_status (status),
           INDEX idx_start_time (start_time),
-          INDEX idx_md5 (md5)
+          INDEX idx_md5 (md5),
+          INDEX idx_md5_status (md5, status)
         ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci
       `);
 
@@ -347,6 +348,26 @@ class MySQLUploadDatabase {
       };
     } catch (error) {
       await this.log('error', `获取上传信息失败: ${error.message}`, fileId);
+      return null;
+    }
+  }
+
+  // 秒传：根据MD5查找已完成的文件
+  async findCompletedByMd5(md5) {
+    try {
+      const connection = await this.pool.getConnection();
+      
+      const [results] = await connection.execute(`
+        SELECT * FROM uploads 
+        WHERE md5 = ? AND status = 'completed' 
+        ORDER BY complete_time DESC 
+        LIMIT 1
+      `, [md5]);
+      
+      connection.release();
+      return results.length > 0 ? results[0] : null;
+    } catch (error) {
+      await this.log('error', `查找已完成文件失败: ${error.message}`);
       return null;
     }
   }

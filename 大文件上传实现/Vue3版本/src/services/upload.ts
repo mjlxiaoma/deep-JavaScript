@@ -107,7 +107,7 @@ export class UploadService {
     })
   }
 
-  async checkUploadedChunks(md5: string, fileName: string, totalChunks: number): Promise<number[]> {
+  async checkUploadedChunks(md5: string, fileName: string, totalChunks: number): Promise<UploadResponse> {
     try {
       const response: AxiosResponse<UploadResponse> = await axios.post(`${this.config.apiBaseUrl}/check-chunks`, {
         md5,
@@ -115,7 +115,7 @@ export class UploadService {
         totalChunks
       })
       
-      return response.data.uploadedChunks || []
+      return response.data
     } catch (error) {
       console.error('检查已上传分片失败:', error)
       throw error
