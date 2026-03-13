@@ -1,13 +1,15 @@
 const fs = require('fs').promises;
+const fsSync = require('fs');
 const path = require('path');
+const crypto = require('crypto');
 const config = require('../config');
 const logger = require('../utils/logger');
 
 class UploadService {
   constructor(database) {
     this.db = database;
-    this.chunksDir = config.upload.chunksDir;
-    this.uploadsDir = config.upload.uploadsDir;
+    this.chunksDir = path.resolve(process.cwd(), config.upload.chunksDir);
+    this.uploadsDir = path.resolve(process.cwd(), config.upload.uploadsDir);
   }
 
   /**
@@ -15,30 +17,62 @@ class UploadService {
    */
   async checkUploadedChunks(fileId, md5, fileName, totalChunks, fileSize = 0, clientInfo = {}) {
     try {
-      // 🚀 秒传检测：先检查是否有相同MD5的已完成文件
+      // 秒传检测：优先查已完成且MD5一致的文件记录，并确保文件物理存在
       const existingFile = await this.db.findCompletedByMd5(md5);
       
-      if (existingFile && existingFile.final_path) {
-        logger.info(`⚡ 秒传命中: ${fileName} (MD5: ${md5})`);
-        
-        // 返回秒传标识和文件信息
-        return {
-          instantUpload: true,
-          fileUrl: existingFile.final_path,
-          fileName: existingFile.file_name,
-          fileSize: existingFile.file_size,
-          uploadedChunks: Array.from({ length: totalChunks }, (_, i) => i) // 所有分片
-        };
+      if (existingFile && existingFile.final_path && existingFile.actual_md5 === md5) {
+        try {
+          await fs.access(existingFile.final_path);
+          logger.info(`⚡ 秒传命中: ${fileName} (MD5: ${md5})`);
+          
+          // 返回秒传标识和文件信息
+          return {
+            instantUpload: true,
+            fileUrl: `/uploads/${existingFile.file_name}`,
+            fileName: existingFile.file_name,
+            fileSize: existingFile.file_size,
+            uploadedChunks: Array.from({ length: totalChunks }, (_, i) => i) // 所有分片
+          };
+        } catch {
+          logger.warn(`秒传文件不存在，回退到正常上传: ${existingFile.final_path}`);
+        }
       }
 
-      // 没有秒传，继续正常的断点续传逻辑
-      // 首先检查数据库中的上传记录
+      // 没有秒传则进入断点续传逻辑：优先数据库，其次文件系统
       let dbInfo = await this.db.getUploadInfo(fileId);
       let uploadedChunks = [];
+      let fromDatabase = false;
+
+      if (dbInfo) {
+        // 已完成但文件不存在：清理记录，回退为新上传（防止误判“已存在”）
+        if (dbInfo.status === 'completed') {
+          const finalPath = dbInfo.final_path || dbInfo.filePath;
+          let exists = false;
+          if (finalPath) {
+            try {
+              await fs.access(finalPath);
+              exists = true;
+            } catch {
+              exists = false;
+            }
+          }
+          if (!exists) {
+            logger.warn(`已完成记录但文件不存在，重置上传: ${fileName}`);
+            try {
+              await this.db.deleteUpload(fileId);
+            } catch {}
+            try {
+              await fs.rm(path.join(this.chunksDir, fileId), { recursive: true, force: true });
+            } catch {}
+            dbInfo = null;
+          }
+        }
+      }
 
       if (dbInfo) {
         // 数据库中有记录，使用数据库数据
         uploadedChunks = dbInfo.uploadedChunks || [];
+        fromDatabase = true;
         logger.info(`从数据库加载: ${fileName} - ${uploadedChunks.length}/${totalChunks} chunks`);
       } else {
         // 数据库中没有记录，检查文件系统（兼容性）
@@ -78,7 +112,9 @@ class UploadService {
 
       return {
         instantUpload: false,
-        uploadedChunks
+        uploadedChunks,
+        progress: totalChunks > 0 ? Math.round((uploadedChunks.length / totalChunks) * 100) : 0,
+        fromDatabase
       };
     } catch (error) {
       logger.error('检查已上传分片失败', error);
@@ -89,22 +125,90 @@ class UploadService {
   /**
    * 保存分片
    */
-  async saveChunk(fileId, chunkIndex, chunkBuffer, md5, fileName, totalChunks, clientInfo = {}) {
+  async saveChunk(fileId, chunkIndex, file, md5, fileName, totalChunks, fileSize = 0, clientInfo = {}, chunkMd5 = null) {
     try {
       const chunksPath = path.join(this.chunksDir, fileId);
       await fs.mkdir(chunksPath, { recursive: true });
 
       const chunkPath = path.join(chunksPath, `chunk_${chunkIndex}`);
-      await fs.writeFile(chunkPath, chunkBuffer);
+      let chunkSize = 0;
+      let computedChunkMd5 = null;
+
+      // 幂等处理：分片已存在则校验MD5并直接返回，避免重复写磁盘
+      try {
+        await fs.access(chunkPath);
+        computedChunkMd5 = await new Promise((resolve, reject) => {
+          const hash = crypto.createHash('md5');
+          const stream = fsSync.createReadStream(chunkPath);
+          stream.on('data', data => hash.update(data));
+          stream.on('end', () => resolve(hash.digest('hex')));
+          stream.on('error', reject);
+        });
+
+        if (chunkMd5 && computedChunkMd5 !== chunkMd5) {
+          const err = new Error('分片MD5校验失败');
+          err.statusCode = 400;
+          throw err;
+        }
+
+        const stats = await fs.stat(chunkPath);
+        chunkSize = stats.size;
+      } catch (error) {
+        if (error.code !== 'ENOENT') {
+          throw error;
+        }
+      }
+
+      if (chunkSize > 0) {
+        // 记录分片并返回（避免重复写入）
+        let uploadInfo = await this.db.getUploadInfo(fileId);
+        if (!uploadInfo) {
+          await this.db.startUpload(fileId, fileName, fileSize || 0, md5, parseInt(totalChunks), clientInfo);
+        }
+        await this.db.recordChunk(fileId, parseInt(chunkIndex), chunkSize, computedChunkMd5);
+        logger.info(`分片已存在: ${fileName} - chunk ${chunkIndex}`);
+        return { success: true, chunkPath, skipped: true };
+      }
+
+      // 兼容两种上传方式：内存buffer或磁盘临时文件
+      if (file && file.buffer) {
+        await fs.writeFile(chunkPath, file.buffer);
+        chunkSize = file.buffer.length;
+        computedChunkMd5 = crypto.createHash('md5').update(file.buffer).digest('hex');
+      } else if (file && file.path) {
+        await fs.rename(file.path, chunkPath);
+        if (typeof file.size === 'number') {
+          chunkSize = file.size;
+        } else {
+          const stats = await fs.stat(chunkPath);
+          chunkSize = stats.size;
+        }
+        computedChunkMd5 = await new Promise((resolve, reject) => {
+          const hash = crypto.createHash('md5');
+          const stream = fsSync.createReadStream(chunkPath);
+          stream.on('data', data => hash.update(data));
+          stream.on('end', () => resolve(hash.digest('hex')));
+          stream.on('error', reject);
+        });
+      } else {
+        throw new Error('无效的分片文件');
+      }
+
+      // 分片MD5校验（可选）：不一致立即拒绝
+      if (chunkMd5 && computedChunkMd5 && chunkMd5 !== computedChunkMd5) {
+        const err = new Error('分片MD5校验失败');
+        err.statusCode = 400;
+        throw err;
+      }
 
       // 确保数据库中有上传记录
       let uploadInfo = await this.db.getUploadInfo(fileId);
       if (!uploadInfo) {
-        await this.db.startUpload(fileId, fileName, 0, md5, parseInt(totalChunks), clientInfo);
+        await this.db.startUpload(fileId, fileName, fileSize || 0, md5, parseInt(totalChunks), clientInfo);
       }
 
       // 记录分片
-      await this.db.recordChunk(fileId, parseInt(chunkIndex), chunkBuffer.length);
+      await this.db.recordChunk(fileId, parseInt(chunkIndex), chunkSize, computedChunkMd5);
 
       logger.info(`分片保存成功: ${fileName} - chunk ${chunkIndex}`);
       
@@ -128,26 +232,53 @@ class UploadService {
       // 创建写入流
       const writeStream = require('fs').createWriteStream(finalPath);
 
-      // 按顺序写入分片
-      for (let i = 0; i < totalChunks; i++) {
-        const chunkPath = path.join(chunksPath, `chunk_${i}`);
-        const chunkBuffer = await fs.readFile(chunkPath);
-        writeStream.write(chunkBuffer);
+      try {
+        // 按顺序写入分片
+        for (let i = 0; i < totalChunks; i++) {
+          const chunkPath = path.join(chunksPath, `chunk_${i}`);
+          const chunkBuffer = await fs.readFile(chunkPath);
+          writeStream.write(chunkBuffer);
+        }
+
+        writeStream.end();
+
+        // 等待写入完成
+        await new Promise((resolve, reject) => {
+          writeStream.on('finish', resolve);
+          writeStream.on('error', reject);
+        });
+      } catch (error) {
+        try {
+          await fs.unlink(finalPath);
+        } catch {}
+        throw error;
       }
-
-      writeStream.end();
-
-      // 等待写入完成
-      await new Promise((resolve, reject) => {
-        writeStream.on('finish', resolve);
-        writeStream.on('error', reject);
-      });
 
       // 获取文件大小
       const stats = await fs.stat(finalPath);
       
+      // 计算合并后文件MD5（流式，避免大文件占用内存）
+      const actualMd5 = await new Promise((resolve, reject) => {
+        const hash = crypto.createHash('md5');
+        const stream = fsSync.createReadStream(finalPath);
+        stream.on('data', data => hash.update(data));
+        stream.on('end', () => resolve(hash.digest('hex')));
+        stream.on('error', reject);
+      });
+
+      // 最终MD5校验失败：删除文件并标记失败
+      if (md5 && actualMd5 !== md5) {
+        try {
+          await fs.unlink(finalPath);
+        } catch {}
+        await this.db.failUpload(fileId, 'MD5校验失败');
+        const err = new Error('MD5校验失败');
+        err.statusCode = 400;
+        throw err;
+      }
+      
       // 更新数据库状态
-      await this.db.completeUpload(fileId, finalPath, stats.size);
+      await this.db.completeUpload(fileId, finalPath, actualMd5, stats.size);
 
       // 清理分片目录（可选）
       try {
@@ -162,7 +293,8 @@ class UploadService {
       return {
         success: true,
         filePath: finalPath,
-        fileSize: stats.size
+        fileSize: stats.size,
+        md5: actualMd5
       };
     } catch (error) {
       logger.error('合并分片失败', error);
@@ -204,9 +336,10 @@ class UploadService {
       }
 
       // 删除合并后的文件
-      if (uploadInfo.filePath) {
+      const finalPath = uploadInfo.final_path || uploadInfo.filePath;
+      if (finalPath) {
         try {
-          await fs.unlink(uploadInfo.filePath);
+          await fs.unlink(finalPath);
         } catch (error) {
           logger.warn('删除文件失败', error);
         }

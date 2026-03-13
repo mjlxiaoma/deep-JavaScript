@@ -486,6 +486,94 @@ class MySQLUploadDatabase {
     }
   }
 
+  // 更新上传状态
+  async updateUploadStatus(fileId, status) {
+    try {
+      const connection = await this.pool.getConnection();
+      try {
+        await connection.execute(`
+          UPDATE uploads 
+          SET status = ?, update_time = CURRENT_TIMESTAMP
+          WHERE file_id = ?
+        `, [status, fileId]);
+      } finally {
+        connection.release();
+      }
+      await this.log('info', `更新上传状态: ${status}`, fileId);
+      return true;
+    } catch (error) {
+      await this.log('error', `更新上传状态失败: ${error.message}`, fileId);
+      return false;
+    }
+  }
+
+  // 删除上传记录
+  async deleteUpload(fileId) {
+    try {
+      const connection = await this.pool.getConnection();
+      try {
+        await connection.execute(`DELETE FROM uploads WHERE file_id = ?`, [fileId]);
+      } finally {
+        connection.release();
+      }
+      await this.log('info', '删除上传记录', fileId);
+      return true;
+    } catch (error) {
+      await this.log('error', `删除上传记录失败: ${error.message}`, fileId);
+      return false;
+    }
+  }
+
+  // 获取上传列表（分页）
+  async getUploadList(page = 1, pageSize = 10, status = null) {
+    try {
+      const connection = await this.pool.getConnection();
+      const offset = (page - 1) * pageSize;
+
+      try {
+        const [countRows] = await connection.execute(
+          `SELECT COUNT(*) as total FROM uploads ${status ? 'WHERE status = ?' : ''}`,
+          status ? [status] : []
+        );
+
+        const [rows] = await connection.execute(
+          `SELECT * FROM uploads ${status ? 'WHERE status = ?' : ''} ORDER BY start_time DESC LIMIT ? OFFSET ?`,
+          status ? [status, pageSize, offset] : [pageSize, offset]
+        );
+
+        return { data: rows, total: countRows[0]?.total || 0 };
+      } finally {
+        connection.release();
+      }
+    } catch (error) {
+      console.error('获取上传列表失败:', error);
+      return { data: [], total: 0 };
+    }
+  }
+
+  // 清理过期上传
+  async cleanupOldUploads(cutoffDate) {
+    try {
+      const connection = await this.pool.getConnection();
+      const cutoff = new Date(cutoffDate);
+
+      try {
+        const [result] = await connection.execute(`
+          DELETE FROM uploads 
+          WHERE (status = 'completed' AND complete_time < ?) 
+             OR (status = 'failed' AND update_time < ?)
+        `, [cutoff, cutoff]);
+
+        return { deleted: result.affectedRows || 0 };
+      } finally {
+        connection.release();
+      }
+    } catch (error) {
+      console.error('清理过期上传失败:', error);
+      return { deleted: 0 };
+    }
+  }
+
   // 清理旧数据
   async cleanup() {
     const connection = await this.pool.getConnection();

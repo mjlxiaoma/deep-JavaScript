@@ -69,7 +69,7 @@ const validateCheckChunks = (req, res, next) => {
  * 验证上传分片请求
  */
 const validateUploadChunk = (req, res, next) => {
-  const { md5, fileName, chunkIndex, totalChunks } = req.body;
+  const { md5, fileName, chunkIndex, totalChunks, fileSize, chunkMd5 } = req.body;
   const errors = [];
 
   if (!req.file) {
@@ -90,6 +90,30 @@ const validateUploadChunk = (req, res, next) => {
 
   if (!totalChunks || !Number.isInteger(parseInt(totalChunks)) || totalChunks <= 0) {
     errors.push({ field: 'totalChunks', message: '总分片数必须是正整数' });
+  }
+
+  // 防止分片索引越界
+  if (chunkIndex !== undefined && totalChunks) {
+    const idx = parseInt(chunkIndex);
+    const total = parseInt(totalChunks);
+    if (Number.isInteger(idx) && Number.isInteger(total) && idx >= total) {
+      errors.push({ field: 'chunkIndex', message: '分片索引超出总分片数' });
+    }
+  }
+
+  if (fileSize && (!Number.isInteger(parseInt(fileSize)) || parseInt(fileSize) < 0)) {
+    errors.push({ field: 'fileSize', message: '文件大小必须是非负整数' });
+  }
+
+  if (fileSize && parseInt(fileSize) > config.upload.maxFileSize) {
+    errors.push({ 
+      field: 'fileSize', 
+      message: `文件大小超过限制 (${(config.upload.maxFileSize / 1024 / 1024 / 1024).toFixed(2)}GB)` 
+    });
+  }
+
+  if (chunkMd5 && (typeof chunkMd5 !== 'string' || chunkMd5.length !== 32)) {
+    errors.push({ field: 'chunkMd5', message: '分片MD5必须是32位字符串' });
   }
 
   if (errors.length > 0) {

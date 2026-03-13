@@ -54,4 +54,5 @@ export interface UploadConfig {
   maxConcurrent: number
   retryTimes: number
   apiBaseUrl: string
-} 
+  enableChunkMd5?: boolean
+}

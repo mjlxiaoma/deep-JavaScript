@@ -1,16 +1,20 @@
 const express = require('express');
 const multer = require('multer');
+const path = require('path');
+const config = require('../config');
 const {
   validateCheckChunks,
   validateUploadChunk,
   validateCompleteUpload
 } = require('../validators/uploadValidator');
 
-// 配置multer使用内存存储
+// 配置multer使用磁盘存储，避免大分片占用内存
+const tempDir = path.resolve(process.cwd(), config.upload.tempDir);
 const upload = multer({
-  storage: multer.memoryStorage(),
+  dest: tempDir,
   limits: {
-    fileSize: 20 * 1024 * 1024 // 20MB per chunk (优化：从10MB增加) ⚡
+    fileSize: config.upload.maxFileSize,
+    fieldSize: 10 * 1024 * 1024
   }
 });
 
@@ -42,6 +46,18 @@ const createUploadRouter = (uploadController) => {
     uploadController.completeUpload.bind(uploadController)
   );
 
+  // 获取上传进度
+  router.get(
+    '/upload-status/:md5/:fileName',
+    uploadController.getUploadStatus.bind(uploadController)
+  );
+
+  // 删除上传任务（兼容旧接口）
+  router.delete(
+    '/upload/:md5/:fileName',
+    uploadController.deleteUploadByName.bind(uploadController)
+  );
+
   // 取消上传
   router.delete(
     '/cancel/:fileId',
@@ -64,6 +80,12 @@ const createUploadRouter = (uploadController) => {
   router.get(
     '/database/stats',
     uploadController.getStats.bind(uploadController)
+  );
+
+  // 服务器统计（兼容旧接口）
+  router.get(
+    '/stats',
+    uploadController.getServerStats.bind(uploadController)
   );
 
   // 获取日志

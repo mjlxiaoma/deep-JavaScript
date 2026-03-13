@@ -11,6 +11,7 @@ export class UploadService {
     this.initHashWorker()
   }
 
+  // 初始化用于分片MD5计算的 Web Worker（避免阻塞主线程）
   private initHashWorker() {
     const workerCode = `
       self.importScripts('https://unpkg.com/spark-md5@3.0.2/spark-md5.min.js');
@@ -50,6 +51,7 @@ export class UploadService {
     this.hashWorker = new Worker(URL.createObjectURL(blob))
   }
 
+  // 计算整文件MD5（用于秒传/断点续传标识）
   async calculateFileHash(file: File, onProgress?: (progress: number) => void): Promise<string> {
     return new Promise((resolve, reject) => {
       const spark = new SparkMD5.ArrayBuffer()
@@ -90,6 +92,7 @@ export class UploadService {
     })
   }
 
+  // 计算单个分片MD5（可选：用于服务端分片校验）
   async calculateChunkHash(chunk: Blob): Promise<string> {
     return new Promise((resolve, reject) => {
       const spark = new SparkMD5.ArrayBuffer()
@@ -107,12 +110,14 @@ export class UploadService {
     })
   }
 
-  async checkUploadedChunks(md5: string, fileName: string, totalChunks: number): Promise<UploadResponse> {
+  // 查询已上传分片（包含秒传判断结果）
+  async checkUploadedChunks(md5: string, fileName: string, totalChunks: number, fileSize?: number): Promise<UploadResponse> {
     try {
       const response: AxiosResponse<UploadResponse> = await axios.post(`${this.config.apiBaseUrl}/check-chunks`, {
         md5,
         fileName,
-        totalChunks
+        totalChunks,
+        ...(fileSize !== undefined ? { fileSize } : {})
       })
       
       return response.data
@@ -122,13 +127,15 @@ export class UploadService {
     }
   }
 
+  // 上传单个分片（支持可选分片MD5）
   async uploadChunk(
     chunk: Blob,
     chunkIndex: number,
     md5: string,
     fileName: string,
     totalChunks: number,
-    onProgress?: (progress: number) => void
+    onProgress?: (progress: number) => void,
+    chunkMd5?: string
   ): Promise<boolean> {
     try {
       const formData = new FormData()
@@ -137,6 +144,9 @@ export class UploadService {
       formData.append('md5', md5)
       formData.append('fileName', fileName)
       formData.append('totalChunks', totalChunks.toString())
+      if (chunkMd5) {
+        formData.append('chunkMd5', chunkMd5)
+      }
 
       const response: AxiosResponse<UploadResponse> = await axios.post(
         `${this.config.apiBaseUrl}/upload-chunk`,
@@ -159,6 +169,7 @@ export class UploadService {
     }
   }
 
+  // 通知服务端合并分片
   async completeUpload(md5: string, fileName: string, totalChunks: number): Promise<UploadResponse> {
     try {
       const response: AxiosResponse<UploadResponse> = await axios.post(`${this.config.apiBaseUrl}/complete-upload`, {
@@ -174,6 +185,7 @@ export class UploadService {
     }
   }
 
+  // 探活：检测后端是否可用
   async checkServerStatus(): Promise<boolean> {
     try {
       const response = await axios.get(`${this.config.apiBaseUrl}/health`, {
@@ -185,6 +197,7 @@ export class UploadService {
     }
   }
 
+  // 根据配置创建分片信息
   createChunks(file: File): ChunkInfo[] {
     const chunks: ChunkInfo[] = []
     const totalChunks = Math.ceil(file.size / this.config.chunkSize)
@@ -204,6 +217,7 @@ export class UploadService {
     return chunks
   }
 
+  // 释放 Worker 资源
   destroy() {
     if (this.hashWorker) {
       this.hashWorker.terminate()

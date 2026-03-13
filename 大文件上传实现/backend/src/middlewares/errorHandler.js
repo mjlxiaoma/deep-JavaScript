@@ -44,6 +44,10 @@ const errorHandler = (err, req, res, next) => {
     return Response.validationError(res, err.details);
   }
 
+  if (err.statusCode) {
+    return Response.error(res, err.message, err.statusCode);
+  }
+
   // 默认服务器错误
   return Response.serverError(res, err);
 };

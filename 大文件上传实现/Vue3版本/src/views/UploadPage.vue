@@ -162,15 +162,31 @@ const uploadStore = useUploadStore()
 const fileInputRef = ref<HTMLInputElement>()
 const isDragOver = ref(false)
 
-// 上传服务配置
+// 上传配置：并发、分片大小与是否启用分片MD5校验
 const uploadConfig: UploadConfig = {
   chunkSize: 5 * 1024 * 1024, // 5MB (优化：从1MB增加，减少HTTP请求数) ⚡
   maxConcurrent: 6, // 6个并发 (优化：从3增加，充分利用带宽) ⚡⚡
   retryTimes: 3,
-  apiBaseUrl: '/api'
+  apiBaseUrl: '/api',
+  enableChunkMd5: true
 }
 
 const uploadService = new UploadService(uploadConfig)
+
+// 简单延迟（用于重试退避）
+const sleep = (ms: number) => new Promise(resolve => setTimeout(resolve, ms))
+
+// 断网等待恢复
+const waitForOnline = async () => {
+  if (navigator.onLine) return
+  await new Promise<void>((resolve) => {
+    const handler = () => {
+      window.removeEventListener('online', handler)
+      resolve()
+    }
+    window.addEventListener('online', handler)
+  })
+}
 
 // 计算属性 - 使用 storeToRefs 保持响应式
 const { uploadList, uploadingCount, completedCount, serverOnline } = storeToRefs(uploadStore)
@@ -190,8 +206,49 @@ const serverStatusText = computed(() =>
 )
 
 // 方法
+// 生成客户端唯一ID（仅用于前端列表）
 const generateFileId = (file: File): string => {
   return `${file.name}_${file.size}_${file.lastModified}_${Date.now()}`
+}
+
+// 文件指纹：用于MD5缓存命中
+const getFileFingerprint = (file: File): string => {
+  return `${file.name}_${file.size}_${file.lastModified}`
+}
+
+// 获取MD5缓存（避免刷新或重试后重复计算）
+const getCachedMd5 = (file: File): string | null => {
+  try {
+    const key = `upload_md5_${getFileFingerprint(file)}`
+    return localStorage.getItem(key)
+  } catch {
+    return null
+  }
+}
+
+// 是否有上传中的任务（用于刷新拦截）
+const hasActiveUploads = () => {
+  return uploadList.value.some(
+    (u) => u.status === 'uploading' || u.status === 'calculating' || u.status === 'ready'
+  )
+}
+
+// 上传中刷新拦截提示
+const handleBeforeUnload = (event: BeforeUnloadEvent) => {
+  if (hasActiveUploads()) {
+    event.preventDefault()
+    event.returnValue = ''
+  }
+}
+
+// 写入MD5缓存
+const setCachedMd5 = (file: File, md5: string) => {
+  try {
+    const key = `upload_md5_${getFileFingerprint(file)}`
+    localStorage.setItem(key, md5)
+  } catch {
+    // ignore
+  }
 }
 
 const formatFileSize = (bytes: number): string => {
@@ -324,22 +381,31 @@ const startUpload = async (fileId: string) => {
   if (!upload) return
 
   try {
-    // 1. 计算文件MD5
+    // 1. 计算文件MD5（优先使用缓存，避免重复耗时）
     uploadStore.updateUpload(fileId, {
       status: 'calculating',
       message: '正在计算文件校验值...'
     })
 
-    const md5 = await uploadService.calculateFileHash(upload.file, (progress) => {
+    let md5 = upload.md5 || getCachedMd5(upload.file)
+    if (md5) {
       uploadStore.updateUpload(fileId, {
-        progress: progress * 0.3, // MD5计算占30%进度
-        message: `计算校验值中... ${Math.round(progress)}%`
+        progress: 30,
+        message: '已使用缓存校验值'
       })
-    })
+    } else {
+      md5 = await uploadService.calculateFileHash(upload.file, (progress) => {
+        uploadStore.updateUpload(fileId, {
+          progress: progress * 0.3, // MD5计算占30%进度
+          message: `计算校验值中... ${Math.round(progress)}%`
+        })
+      })
+      setCachedMd5(upload.file, md5)
+    }
 
     uploadStore.updateUpload(fileId, { md5 })
 
-    // 2. 检查已上传的分片（包含秒传检测）
+    // 2. 检查已上传分片（包含秒传检测）
     uploadStore.updateUpload(fileId, {
       status: 'uploading',
       message: '检查服务器文件...'
@@ -348,10 +414,11 @@ const startUpload = async (fileId: string) => {
     const checkResult = await uploadService.checkUploadedChunks(
       md5, 
       upload.name, 
-      upload.totalChunks
+      upload.totalChunks,
+      upload.size
     )
 
-    // 🚀 秒传：文件已存在，直接完成
+    // 秒传命中：直接完成
     if (checkResult.instantUpload) {
       uploadStore.updateUpload(fileId, {
         status: 'success',
@@ -374,17 +441,7 @@ const startUpload = async (fileId: string) => {
       progress: 30 + (uploadedChunks.length / upload.totalChunks) * 70
     })
 
-    if (uploadedChunks.length === upload.totalChunks) {
-      uploadStore.updateUpload(fileId, {
-        status: 'success',
-        message: '文件已存在，上传完成',
-        progress: 100,
-        completedAt: new Date()
-      })
-      return
-    }
-
-    // 3. 上传剩余分片
+    // 3. 上传剩余分片（支持断网等待与失败重试）
     await uploadRemainingChunks(fileId, uploadedChunks)
 
   } catch (error) {
@@ -412,30 +469,75 @@ const uploadRemainingChunks = async (fileId: string, uploadedChunks: number[]) =
     const end = Math.min(start + uploadConfig.chunkSize, upload.file.size)
     const chunk = upload.file.slice(start, end)
 
-    const success = await uploadService.uploadChunk(
-      chunk,
-      i,
-      upload.md5,
-      upload.name,
-      upload.totalChunks
-    )
+    // 分片MD5（可选）：用于服务端校验分片完整性
+    let chunkMd5: string | undefined
+    if (uploadConfig.enableChunkMd5) {
+      try {
+        chunkMd5 = await uploadService.calculateChunkHash(chunk)
+      } catch (error) {
+        console.warn('分片MD5计算失败，继续上传:', error)
+      }
+    }
 
-    if (success) {
-      const newUploadedChunks = upload.uploadedChunks + 1
-      const progress = 30 + (newUploadedChunks / upload.totalChunks) * 70
-      
+    let success = false
+    for (let attempt = 0; attempt < uploadConfig.retryTimes; attempt++) {
+      if (upload.paused) break
+
+      // 断网处理：等待恢复后继续
+      if (!navigator.onLine) {
+        uploadStore.updateUpload(fileId, {
+          status: 'paused',
+          paused: true,
+          message: '网络断开，等待恢复...'
+        })
+        await waitForOnline()
+        uploadStore.updateUpload(fileId, {
+          status: 'uploading',
+          paused: false,
+          message: '网络已恢复，继续上传...'
+        })
+      }
+
+      success = await uploadService.uploadChunk(
+        chunk,
+        i,
+        upload.md5,
+        upload.name,
+        upload.totalChunks,
+        undefined,
+        chunkMd5
+      )
+
+      if (success) break
+
+      const nextAttempt = attempt + 1
+      if (nextAttempt < uploadConfig.retryTimes) {
+        uploadStore.updateUpload(fileId, {
+          message: `上传失败，重试中... (${nextAttempt}/${uploadConfig.retryTimes})`
+        })
+        // 指数退避，避免频繁重试
+        await sleep(500 * Math.pow(2, attempt))
+      }
+    }
+
+    // 多次失败：进入暂停，等待用户手动继续
+    if (!success) {
       uploadStore.updateUpload(fileId, {
-        uploadedChunks: newUploadedChunks,
-        progress,
-        message: `上传中... ${newUploadedChunks}/${upload.totalChunks}`
-      })
-    } else {
-      uploadStore.updateUpload(fileId, {
-        status: 'error',
-        message: '分片上传失败'
+        status: 'paused',
+        paused: true,
+        message: '上传失败，点击继续上传'
       })
       return
     }
+
+    const newUploadedChunks = upload.uploadedChunks + 1
+    const progress = 30 + (newUploadedChunks / upload.totalChunks) * 70
+    
+    uploadStore.updateUpload(fileId, {
+      uploadedChunks: newUploadedChunks,
+      progress,
+      message: `上传中... ${newUploadedChunks}/${upload.totalChunks}`
+    })
   }
 
   // 4. 完成上传
@@ -525,10 +627,12 @@ onMounted(() => {
   checkServerStatus()
   // 定期检查服务器状态
   const interval = setInterval(checkServerStatus, 30000)
+  window.addEventListener('beforeunload', handleBeforeUnload)
   
   onUnmounted(() => {
     clearInterval(interval)
     uploadService.destroy()
+    window.removeEventListener('beforeunload', handleBeforeUnload)
   })
 })
 </script>

@@ -1,6 +1,6 @@
 # 断点续传后端服务器
 
-一个独立的Node.js后端服务，支持大文件断点续传上传。
+一个独立的 Node.js 后端服务，支持大文件断点续传上传。
 
 ## 📋 功能特性
 
@@ -11,7 +11,7 @@
 - 📊 **实时监控** - 上传进度和服务器状态
 - 🛡️ **错误处理** - 完善的错误处理和重试机制
 - 🗑️ **自动清理** - 自动清理临时文件和过期状态
-- 🗄️ **数据库支持** - 支持SQLite和MySQL两种数据库
+- 🗄️ **数据库支持** - MySQL（连接池、事务、高并发支持）
 - 📈 **数据统计** - 详细的上传统计和日志记录
 - 🔧 **企业级** - 连接池、事务、高并发支持
 
@@ -21,13 +21,6 @@
 ```bash
 cd backend
 npm install
-
-# 选择数据库类型
-# SQLite (默认，零配置)
-install-database.bat
-
-# 或 MySQL (企业级)
-install-mysql.bat
 ```
 
 ### 启动服务器
@@ -48,7 +41,15 @@ npm run dev
 
 ```
 backend/
-├── server.js          # 主服务器文件
+├── src/
+│   ├── app.js         # 应用入口
+│   ├── server.js      # 服务器启动入口
+│   ├── routes/        # 路由
+│   ├── controllers/   # 控制器
+│   ├── services/      # 业务逻辑
+│   ├── middlewares/   # 中间件
+│   ├── validators/    # 参数校验
+│   └── utils/         # 工具
 ├── package.json       # 依赖配置
 ├── README.md          # 说明文档
 ├── temp/              # 临时文件目录
@@ -213,26 +214,13 @@ MAX_FILE_SIZE=10737418240   # 最大文件大小 (10GB)
 ## 🔧 开发配置
 
 ### 修改CORS设置
-在 `server.js` 中修改允许的源地址:
-```javascript
-app.use(cors({
-  origin: [
-    'http://localhost:5173',  // Vue3版本
-    'http://localhost:4174',  // React版本
-    'https://your-domain.com' // 生产环境
-  ]
-}));
-```
+在 `src/config/index.js` 中修改 `cors` 配置。
 
 ### 修改文件大小限制
 ```javascript
-const upload = multer({ 
-  dest: path.join(__dirname, 'temp'),
-  limits: {
-    fileSize: 10 * 1024 * 1024 * 1024, // 10GB
-    fieldSize: 10 * 1024 * 1024 // 10MB
-  }
-});
+upload: {
+  maxFileSize: 10 * 1024 * 1024 * 1024
+}
 ```
 
 ## 📊 性能特性
@@ -255,7 +243,7 @@ const upload = multer({
 ### PM2部署
 ```bash
 npm install -g pm2
-pm2 start server.js --name "upload-server"
+pm2 start src/server.js --name "upload-server"
 pm2 startup
 pm2 save
 ```

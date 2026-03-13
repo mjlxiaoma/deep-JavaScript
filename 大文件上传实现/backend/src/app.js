@@ -1,5 +1,7 @@
 const express = require('express');
 const cors = require('cors');
+const fs = require('fs').promises;
+const path = require('path');
 const config = require('./config');
 const logger = require('./utils/logger');
 const requestLogger = require('./middlewares/requestLogger');
@@ -23,7 +25,20 @@ class App {
   async initDatabase() {
     try {
       this.db = new MySQLUploadDatabase();
-      await this.db.init();
+
+      // 等待数据库就绪（MySQL异步初始化）
+      if (this.db && typeof this.db.healthCheck === 'function') {
+        let ready = false;
+        for (let i = 0; i < 10; i++) {
+          ready = await this.db.healthCheck();
+          if (ready) break;
+          await new Promise(resolve => setTimeout(resolve, 500));
+        }
+        if (!ready) {
+          throw new Error('数据库连接测试失败');
+        }
+      }
+
       logger.info('数据库初始化成功');
       return true;
     } catch (error) {
@@ -49,8 +64,8 @@ class App {
     this.app.use(cors(config.cors));
 
     // 解析JSON和URL编码的请求体
-    this.app.use(express.json());
-    this.app.use(express.urlencoded({ extended: true }));
+    this.app.use(express.json({ limit: '50mb' }));
+    this.app.use(express.urlencoded({ extended: true, limit: '50mb' }));
 
     // 请求日志中间件
     this.app.use(requestLogger);
@@ -67,7 +82,7 @@ class App {
     this.app.use('/api', uploadRouter);
 
     // 静态文件服务（可选）
-    // this.app.use('/uploads', express.static(config.upload.uploadsDir));
+    this.app.use('/uploads', express.static(path.resolve(process.cwd(), config.upload.uploadsDir)));
 
     // 404处理
     this.app.use(notFoundHandler);
@@ -102,6 +117,9 @@ class App {
    */
   async initialize() {
     try {
+      // 确保必要目录存在
+      await this.ensureDirectories();
+
       // 初始化数据库
       await this.initDatabase();
 
@@ -122,6 +140,28 @@ class App {
     } catch (error) {
       logger.error('应用初始化失败', error);
       throw error;
+    }
+  }
+
+  /**
+   * 确保必要目录存在
+   */
+  async ensureDirectories() {
+    const dirs = [
+      config.upload.tempDir,
+      config.upload.uploadsDir,
+      config.upload.chunksDir,
+      './logs'
+    ];
+
+    for (const dir of dirs) {
+      const dirPath = path.resolve(process.cwd(), dir);
+      try {
+        await fs.access(dirPath);
+      } catch {
+        await fs.mkdir(dirPath, { recursive: true });
+        logger.info(`创建目录: ${dirPath}`);
+      }
     }
   }
 
